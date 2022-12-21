@@ -1,0 +1,218 @@
+----
+
+pyocf
+=====
+
+.. note:
+
+    Python Library for OCF handling.
+    
+    Creates Python objects from OCF files, or OCF files from Python objects.
+    
+    Runtime type handling thanks to pydantic.
+    
+    The code is generated from the OCF schema.
+
+----
+
+Code generation
+===============
+
+.. note:
+
+    First of all, the JSON Schema has URL's as ids, and several generators looks at a reference, 
+    and if it's a URL, it tries to fetch the schema for that reference from that URL. 
+    And that might work, if the schema was released and published, and not in a beta version. 
+    But OCF is in beta version, and isn't completely published, so that fails. 
+    Instead the code generator needs to load all the schema files first, and only then try to resolve them.
+    
+    I looked at a few:
+    
+    * json-schema-codegen and statham-schema, both of which I couldn't understand how to create objects 
+      from more than one schema file at a a time.
+    
+    * Warlock, which creates objects, not code, which makes me worried iẗ́'s going to be hard to debug, and also suffered
+      from the reference issue.
+      
+    * yacg, which the author weirdly only has published as a Docker container, so that went nowhere. 
+      The code is also quite complex, because it actually tries to be generic, so it can support
+      both any type of schema, and any type of output code, which seems overly ambitious.
+    
+    And then datamodel-codegen, which I looked more closely, as it seemed promising.
+    It also has the URL loading problem, but I could work around that, and have it generate code.
+    
+    
+    However, it uses the file names as the names for modules, which makes sense, but unfortunately, Python
+    style guides say that file names should be lowercase, and the OCF Schema filenames are not. 
+    It  also generated the class names from the schema titles. And that gives us classes like
+    `pyocf.objects.StockClass.ObjectStockClass()` when we would have wanted wanted 
+    `pyocf.objects.stockclass.StockClass()`.
+
+----
+
+A title
+=======
+
+.. note:
+
+    Fixing those problems by modifying the Schema still resulted in code like this:
+    
+    
+        class StockClass(BaseModel):
+            class Config:
+                extra = Extra.forbid
+        
+            __root__: Any
+        
+        
+        class StockClassModel(BaseModel):
+            class Config:
+                extra = Extra.forbid
+        
+            object_type: Optional[Any] = None
+            name: str = Field(
+                ...,
+                description='Name for the stock type (e.g. Series A Preferred or Class A Common)',
+            )
+            class_type: StockClassType.StockClassTypeModel = Field(
+                ..., description='The type of this stock class (e.g. Preferred or Common)'
+            )
+            [...]
+        
+    
+    Why is there a StockClass, and a StockClassModel? I don't know know. And at
+    this point I needed to use field discriminators, which I will explain later,
+    and I couldn't get that to work, so I decided to make my own code generator.
+    The code is simple, I though it would only take a few days. Well, it took a
+    few weeks, but still I did it.
+    
+    And now we need to talk about Pydantic. 
+
+----
+
+Pydantic
+========
+
+.. note:
+
+    Both datamodel-codegen and our code generator generates code that uses Pydantic.
+    Pydantic is a runtime data verification library. So you set up your classes with Python 
+    type hints, and Pydantic will, during runtime, make sure you only set attributes to the right type,
+    and what more, it will try to convert the indata to the right types. This is very handy for
+    importing data from text files like JSON.
+    
+    Pydantic runtime verification is slow, but you can avoid all verification with .construct() if you need speed.
+    So if you KNOW the data is as it should be you can construct it quickly.
+
+----
+
+Field Discriminators
+====================
+
+.. note:
+
+    There are 31 different types of transactions, which means the transaction file has a field like this:
+    
+        # List of OCF transaction objects
+        items: list[
+                ConvertibleAcceptance
+                | PlanSecurityAcceptance
+                | StockAcceptance
+                | WarrantAcceptance
+                | ConvertibleCancellation
+                | PlanSecurityCancellation
+                | StockCancellation
+                | WarrantCancellation
+                | ConvertibleConversion
+                | StockConversion
+                | PlanSecurityExercise
+                | WarrantExercise
+                | ConvertibleIssuance
+                | PlanSecurityIssuance
+                | StockIssuance
+                | WarrantIssuance
+                | StockReissuance
+                | StockRepurchase
+                | PlanSecurityRelease
+                | ConvertibleRetraction
+                | PlanSecurityRetraction
+                | StockRetraction
+                | WarrantRetraction
+                | StockClassSplit
+                | ConvertibleTransfer
+                | PlanSecurityTransfer
+                | StockTransfer
+                | WarrantTransfer
+                | VestingStart
+                | VestingEvent
+                | StockPlanPoolAdjustment,
+            ]
+    
+    But when loading this from a JSON file, how does it know which of these classes to create? 
+    Well, that's where the magic of field discriminatiors enter.
+    
+    
+        # List of OCF transaction objects
+        items: list[
+            Annotated[
+                ConvertibleAcceptance
+            [29 classes removed for brevity]
+                | StockPlanPoolAdjustment,
+                Field(discriminator="object_type"),
+            ]
+    
+    This means it loads the json, looks at the object_type field in the JSON, looks at all the
+    allowed classes, and finds the object type that matches.
+    
+    The classes has a literal set to match again. It's less than pretty, but it works:
+    
+        class StockPlanPoolAdjustment(Object, Transaction, StockPlanTransaction):
+            """Stock Plan Pool Adjustment Transaction"""
+        
+            object_type: Literal["TX_STOCK_PLAN_POOL_ADJUSTMENT"] = "TX_STOCK_PLAN_POOL_ADJUSTMENT"
+    
+    The Literal["TX_STOCK_PLAN_POOL_ADJUSTMENT"] bit says that this HAS to be a Literal string with that value,
+    and the = "TX_STOCK_PLAN_POOL_ADJUSTMENT" sets it to that value. A bit redundant, but it seems like this is
+    the correct way to do it. 
+
+----
+
+Code style
+==========
+
+.. note:
+
+    How to make it pretty? Black, of course, but it doesn't break long strings or comments,
+    so that is done manually.
+    
+    I currently import classes, so code looks like this:
+    
+        from pyocf.objects.transactions.acceptance.stockacceptance import StockAcceptance
+        from pyocf.objects.transactions.acceptance.warrantacceptance import WarrantAcceptance
+        from pyocf.objects.transactions.adjustment.stockplanpooladjustment import (
+            StockPlanPoolAdjustment,
+        )
+    
+        [...]
+    
+        transaction: StockAcceptance | WarrantAcceptance | StockPlanPoolAdjustment
+        
+        
+    I could possibly just import pyocf instead, and have code like this:
+    
+        import pyocf
+        
+        transaction = (
+            pyocf.objects.transactions.acceptance.stockacceptance.StockAcceptance |
+            pyocf.objects.transactions.acceptance.warrantacceptance.WarrantAcceptance |
+            pyocf.objects.transactions.adjustment.stockplanpooladjustment.StockPlanPoolAdjustment,
+        )
+    
+    Or any form of compromise there, opinions are welcome.
+    
+    We could use Field() everywhere, not just when we have discriminator fields. 
+    
+    That would make it possible to get descriptions on fields, but on the otehr
+    hand, the descriptions are very long, so it makes for ugly code, so I just
+    stuck it as comments for the time being.
+    
